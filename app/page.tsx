@@ -1,12 +1,156 @@
-import { Mic, Upload, Video, Type, Menu } from "lucide-react"
+"use client"
+
+import { useState, useEffect, useRef } from "react"
+import { Mic, Upload, Video, Type, Menu, Send } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import ReactMarkdown from "react-markdown"
+import remarkGfm from "remark-gfm"
+
+interface Message {
+  id: string;
+  role: 'user' | 'ai';
+  content: string;
+}
 
 export default function Page() {
+  const [isInputMode, setIsInputMode] = useState(false)
+  const [inputValue, setInputValue] = useState("")
+  const [messages, setMessages] = useState<Message[]>([])
+  const [isConnected, setIsConnected] = useState(false)
+  const [isAIGenerating, setIsAIGenerating] = useState(false)
+  const [isThinking, setIsThinking] = useState(false)
+  const socketRef = useRef<WebSocket | null>(null)
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const handleIncomingEventRef = useRef<any>(null)
+
+  // 自动滚动到底部
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight
+    }
+  }, [messages])
+
+  useEffect(() => {
+    handleIncomingEventRef.current = handleIncomingEvent
+  }, [messages, isAIGenerating, isThinking])
+
+  useEffect(() => {
+    // 初始化 WebSocket 只有在客户端
+    const socket = new WebSocket("ws://localhost:8080/ws/chat")
+    socketRef.current = socket
+
+    socket.onopen = () => {
+      console.log("WebSocket Connected")
+      setIsConnected(true)
+    }
+
+    socket.onclose = () => {
+      console.log("WebSocket Disconnected")
+      setIsConnected(false)
+      setIsAIGenerating(false)
+      setIsThinking(false)
+    }
+
+    socket.onerror = (error) => {
+      console.error("WebSocket Error:", error)
+      setIsAIGenerating(false)
+      setIsThinking(false)
+    }
+
+    socket.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        if (handleIncomingEventRef.current) {
+          handleIncomingEventRef.current(data)
+        }
+      } catch (e) {
+        console.error("Failed to parse message:", e)
+      }
+    }
+
+    return () => {
+      socket.close()
+    }
+  }, [])
+
+  const handleIncomingEvent = (event: any) => {
+    // 任何来自 AI 的信号都应该结束“思考中”状态
+    if (['on_dialogue_start', 'on_chat_model_stream', 'on_dialogue_end', 'on_chat_model_start'].includes(event.event)) {
+      setIsThinking(false)
+    }
+
+    if (event.event === 'on_dialogue_start') {
+      setMessages(prev => {
+        // 避免重复创建 AI 消息对象
+        const lastMsg = prev[prev.length - 1]
+        if (lastMsg && lastMsg.role === 'ai' && lastMsg.content === '') {
+          return prev
+        }
+        return [
+          ...prev,
+          {
+            id: Date.now().toString(),
+            role: 'ai',
+            content: ''
+          }
+        ]
+      })
+      return
+    }
+
+    if (event.event === 'on_dialogue_end') {
+      setIsAIGenerating(false)
+      setIsThinking(false)
+      return
+    }
+
+    if (event.event === 'on_chat_model_stream' && event.data?.content) {
+      setMessages(prev => {
+        const lastMsg = prev[prev.length - 1]
+        if (lastMsg && lastMsg.role === 'ai') {
+          const updatedMsg = { ...lastMsg, content: lastMsg.content + event.data.content }
+          return [...prev.slice(0, -1), updatedMsg]
+        } else {
+          // 如果没有预先创建 AI 消息，则创建一个新的
+          return [
+            ...prev,
+            {
+              id: Date.now().toString(),
+              role: 'ai',
+              content: event.data.content
+            }
+          ]
+        }
+      })
+    }
+  }
+
+  const sendMessage = () => {
+    if (!inputValue.trim() || !socketRef.current || isAIGenerating) return
+
+    const userMsg: Message = {
+      id: Date.now().toString(),
+      role: 'user',
+      content: inputValue
+    }
+
+    setMessages(prev => [...prev, userMsg])
+    setIsAIGenerating(true)
+    setIsThinking(true)
+    socketRef.current.send(JSON.stringify({ content: inputValue }))
+    
+    setInputValue("")
+    setIsInputMode(false)
+  }
+
   return (
-    <div className="flex min-h-screen flex-col bg-gradient-to-br from-pink-100 via-purple-50 to-cyan-100">
+    <div className="flex h-screen flex-col bg-linear-to-br from-pink-100 via-purple-50 to-cyan-100 transition-colors duration-300 overflow-hidden">
       {/* Header */}
-      <header className="sticky top-0 z-50 flex items-center justify-between border-b border-pink-200/30 bg-gradient-to-r from-pink-50/80 via-purple-50/80 to-cyan-50/80 backdrop-blur-md px-4 py-3">
-        <h1 className="text-lg font-semibold bg-gradient-to-r from-pink-600 via-purple-600 to-cyan-600 bg-clip-text text-transparent">Athena</h1>
+      <header className="sticky top-0 z-50 shrink-0 flex items-center justify-between border-b border-pink-200/30 bg-linear-to-r from-pink-50/80 via-purple-50/80 to-cyan-50/80 backdrop-blur-md px-4 py-3">
+        <div className="flex items-center gap-2">
+          <h1 className="text-lg font-semibold bg-linear-to-r from-pink-600 via-purple-600 to-cyan-600 bg-clip-text text-transparent">Athena</h1>
+          <div className={`size-2 rounded-full ${isConnected ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`} title={isConnected ? '已连接' : '未连接'} />
+        </div>
         <Button 
           size="icon" 
           variant="ghost" 
@@ -16,51 +160,168 @@ export default function Page() {
           <span className="sr-only">菜单</span>
         </Button>
       </header>
-      {/* Main Content Area */}
-      <main className="flex flex-1 flex-col items-center justify-center px-6">
 
+      {/* Main Content Area and Footer */}
+      <div className="flex-1 relative overflow-hidden">
+        <main 
+          ref={scrollRef}
+          className={`absolute inset-0 flex flex-col px-6 overflow-y-auto pt-4 pb-48 scroll-smooth scrollbar-hide ${messages.length === 0 ? 'items-center justify-center' : 'items-stretch justify-start'}`}
+          style={{
+            maskImage: 'linear-gradient(to bottom, black 80%, transparent 98%)',
+            WebkitMaskImage: 'linear-gradient(to bottom, black 80%, transparent 98%)'
+          }}
+          onClick={() => {
+            if (isInputMode && !inputValue) {
+              setIsInputMode(false)
+            }
+          }}
+        >
+          {messages.length === 0 ? (
+            <div className="text-center space-y-4 max-w-md animate-in fade-in slide-in-from-bottom-4 duration-700">
+              <div className="bg-white/40 backdrop-blur-xl p-8 rounded-3xl border border-white/20 shadow-2xl">
+                <h2 className="text-3xl font-bold text-gray-800 mb-2">您好，我是 Athena</h2>
+                <p className="text-gray-600 leading-relaxed">您的全能智能管家。</p>
+              </div>
+            </div>
+          ) : (
+            <div className="max-w-4xl mx-auto w-full space-y-6">
+              {messages.map((msg) => (
+                <div 
+                  key={msg.id} 
+                  className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}
+                >
+                  {msg.role === 'user' ? (
+                    <div className="max-w-[80%] px-4 py-2">
+                      <p className="text-gray-500 font-medium text-sm whitespace-pre-wrap text-right">{msg.content}</p>
+                    </div>
+                  ) : (
+                    <div className="w-full max-w-[95%] py-2 animate-in fade-in slide-in-from-left-2 duration-300">
+                      <div className="text-[15px] text-gray-800 leading-relaxed font-normal">
+                        <ReactMarkdown 
+                          remarkPlugins={[remarkGfm]}
+                          components={{
+                            ul: ({ ...props }) => <ul className="list-disc ml-6 space-y-1 my-2" {...props} />,
+                            ol: ({ ...props }) => <ol className="list-decimal ml-6 space-y-1 my-2" {...props} />,
+                            p: ({ ...props }) => <p className="mb-2 last:mb-0" {...props} />,
+                            code: ({ ...props }) => <code className="bg-gray-200/50 px-1.5 py-0.5 rounded text-pink-600 font-mono text-sm" {...props} />,
+                            pre: ({ ...props }) => <pre className="bg-gray-800 text-gray-100 p-4 rounded-lg my-3 overflow-x-auto" {...props} />,
+                            h1: ({ ...props }) => <h1 className="text-xl font-bold mb-3 mt-4" {...props} />,
+                            h2: ({ ...props }) => <h2 className="text-lg font-bold mb-2 mt-3" {...props} />,
+                            h3: ({ ...props }) => <h3 className="text-base font-bold mb-2 mt-2" {...props} />,
+                            blockquote: ({ ...props }) => <blockquote className="border-l-4 border-gray-300 pl-4 italic my-2" {...props} />,
+                          }}
+                        >
+                          {msg.content}
+                        </ReactMarkdown>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ))}
+              {isThinking && (
+                <div className="flex flex-col items-start">
+                  <div className="w-full max-w-[95%] py-2 animate-in fade-in slide-in-from-left-2 duration-300">
+                    <div className="text-[15px] text-gray-500 leading-relaxed whitespace-pre-wrap font-normal flex items-center gap-2">
+                      <div className="h-2 w-2 rounded-full bg-gray-400 animate-bounce" />
+                      思考中...
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </main>
 
-      </main>
+        {/* Bottom Control Buttons */}
+        <footer className="absolute bottom-0 left-0 right-0 z-10 p-6 pb-12 pointer-events-none overflow-hidden">
+          <div className="max-w-2xl mx-auto w-full pointer-events-auto">
+            <div className="relative h-20">
+              {/* Input Mode UI */}
+              <div 
+                className={`absolute inset-0 flex items-center justify-center gap-2 transition-all duration-300 ease-out transform ${
+                  isInputMode 
+                    ? "opacity-100 translate-y-0 scale-100 pointer-events-auto" 
+                    : "opacity-0 translate-y-2 scale-98 pointer-events-none"
+                }`}
+              >
+                <input
+                  type="text"
+                  value={inputValue}
+                  onChange={(e) => setInputValue(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      sendMessage()
+                    }
+                  }}
+                  disabled={isAIGenerating}
+                  placeholder={isAIGenerating ? "AI 思考中..." : "请输入您的问题..."}
+                  className="flex-1 h-14 px-6 rounded-full border border-pink-200 bg-white/90 shadow-sm focus:outline-none focus:ring-2 focus:ring-purple-400/50 backdrop-blur-md transition-all text-gray-700 disabled:bg-gray-100/50 disabled:text-gray-400 disabled:cursor-not-allowed"
+                  autoFocus={isInputMode}
+                />
+                <Button 
+                  size="icon" 
+                  className="h-14 w-14 rounded-full bg-linear-to-r from-pink-500 to-purple-600 text-white shadow-md hover:shadow-lg hover:opacity-90 transition-all active:scale-90 disabled:opacity-50 disabled:cursor-not-allowed"
+                  onClick={sendMessage}
+                  disabled={isAIGenerating || !inputValue.trim()}
+                >
+                  <Send className="size-6" />
+                  <span className="sr-only">发送</span>
+                </Button>
+              </div>
 
-      {/* Bottom Control Buttons */}
-      <footer className="p-6 pb-12">
-        {/* Status Indicator */}
-        <div className="flex flex-col items-center gap-3 pb-3">
-          {/* Loading Dots */}
-          <div className="flex gap-2">
-            <div className="h-4 w-4 rounded-full bg-gray-400"></div>
-            <div className="h-4 w-4 rounded-full bg-gray-400"></div>
-            <div className="h-4 w-4 rounded-full bg-gray-400"></div>
+              {/* Default Buttons UI */}
+              <div 
+                className={`absolute inset-0 flex items-center justify-center gap-4 transition-all duration-300 ease-out transform ${
+                  !isInputMode 
+                    ? "opacity-100 translate-y-0 scale-100 pointer-events-auto" 
+                    : "opacity-0 -translate-y-2 scale-98 pointer-events-none"
+                }`}
+              >
+                <Button 
+                  size="icon" 
+                  variant="secondary" 
+                  className="h-20 w-20 rounded-full bg-white/80 hover:bg-white shadow-sm hover:shadow-md transition-all hover:scale-105 active:scale-90 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100"
+                  onClick={() => setIsInputMode(true)}
+                  disabled={isAIGenerating}
+                >
+                  <Type className="size-6" />
+                  <span className="sr-only">文字输入</span>
+                </Button>
+
+                <Button 
+                  size="icon" 
+                  variant="secondary" 
+                  className="h-20 w-20 rounded-full bg-white/80 hover:bg-white shadow-sm hover:shadow-md transition-all hover:scale-105 active:scale-90 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100"
+                  disabled={isAIGenerating}
+                >
+                  <Upload className="size-6" />
+                  <span className="sr-only">上传文件</span>
+                </Button>
+
+                <Button 
+                  size="icon" 
+                  variant="secondary" 
+                  className="h-20 w-20 rounded-full bg-white/80 hover:bg-white shadow-sm hover:shadow-md transition-all hover:scale-105 active:scale-90 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100"
+                  disabled={isAIGenerating}
+                >
+                  <Video className="size-6" />
+                  <span className="sr-only">视频输入</span>
+                </Button>
+
+                <Button 
+                  size="icon" 
+                  variant="secondary" 
+                  className="h-20 w-20 rounded-full bg-white/80 hover:bg-white shadow-sm hover:shadow-md transition-all hover:scale-105 active:scale-90 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100"
+                  disabled={isAIGenerating}
+                >
+                  <Mic className="size-6" />
+                  <span className="sr-only">语音输入</span>
+                </Button>
+              </div>
+            </div>
           </div>
-          {/* Status Text */}
-          <p className="text-center text-base text-muted-foreground">你可以开始说话</p>
-        </div>
-        <div className="flex items-center justify-center gap-4">
-          {/* Text Input Button */}
-          <Button size="icon" variant="secondary" className="h-20 w-20 rounded-full bg-white/80 hover:bg-white">
-            <Type className="size-6" />
-            <span className="sr-only">文字输入</span>
-          </Button>
-
-          {/* Upload Button */}
-          <Button size="icon" variant="secondary" className="h-20 w-20 rounded-full bg-white/80 hover:bg-white">
-            <Upload className="size-6" />
-            <span className="sr-only">上传文件</span>
-          </Button>
-
-          {/* Video Button */}
-          <Button size="icon" variant="secondary" className="h-20 w-20 rounded-full bg-white/80 hover:bg-white">
-            <Video className="size-6" />
-            <span className="sr-only">视频输入</span>
-          </Button>
-
-          {/* Microphone Button */}
-          <Button size="icon" variant="secondary" className="h-20 w-20 rounded-full bg-white/80 hover:bg-white">
-            <Mic className="size-6" />
-            <span className="sr-only">语音输入</span>
-          </Button>
-        </div>
-      </footer>
+        </footer>
+      </div>
     </div>
   )
 }
