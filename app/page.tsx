@@ -19,6 +19,7 @@ export default function Page() {
   const [inputValue, setInputValue] = useState("")
   const [messages, setMessages] = useState<Message[]>([])
   const [isConnected, setIsConnected] = useState(false)
+  const [isSessionTerminated, setIsSessionTerminated] = useState(false)
   const [isAIGenerating, setIsAIGenerating] = useState(false)
   const [isThinking, setIsThinking] = useState(false)
   const [isVoiceInputting, setIsVoiceInputting] = useState(false)
@@ -525,12 +526,14 @@ export default function Page() {
       setIsConnected(false)
       setIsAIGenerating(false)
       setIsThinking(false)
+      setIsSessionTerminated(true)
     }
 
     socket.onerror = (error) => {
       console.error("WebSocket Error:", error)
       setIsAIGenerating(false)
       setIsThinking(false)
+      setIsSessionTerminated(true)
     }
 
     socket.onmessage = (event) => {
@@ -918,6 +921,37 @@ export default function Page() {
           </div>
         </footer>
       </div>
+
+      {isSessionTerminated && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+          <div className="bg-white rounded-2xl p-8 max-w-sm w-full mx-4 shadow-2xl transform transition-all animate-in fade-in zoom-in duration-300">
+            <h3 className="text-xl font-bold text-gray-900 mb-4">会话已终止</h3>
+            <p className="text-gray-600 mb-8">与服务器的连接已断开，请选择下一步操作。</p>
+            <div className="flex flex-col gap-3">
+              <Button 
+                className="w-full h-12 rounded-xl bg-linear-to-r from-pink-500 to-purple-600 text-white font-medium hover:opacity-90 transition-all active:scale-95"
+                onClick={() => window.location.reload()}
+              >
+                开始新的对话
+              </Button>
+              <Button 
+                variant="outline"
+                className="w-full h-12 rounded-xl border-gray-200 text-gray-600 font-medium hover:bg-gray-50 transition-all active:scale-95"
+                onClick={() => {
+                  // 如果能关闭窗口则关闭，否则重定向
+                  if (window.opener) {
+                    window.close();
+                  } else {
+                    window.location.href = "about:blank";
+                  }
+                }}
+              >
+                退出
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
