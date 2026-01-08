@@ -1,10 +1,12 @@
 "use client"
 
 import { useState, useEffect, useRef } from "react"
-import { Mic, Upload, Video, Type, Menu, Send, Volume2, VolumeX } from "lucide-react"
+import { Mic, Upload, Video, Type, Menu, Send, Volume2, VolumeX, Copy, Check, Play } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
+import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
+import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism'
 
 interface Message {
   id: string;
@@ -23,7 +25,19 @@ export default function Page() {
   const [isButtonPressed, setIsButtonPressed] = useState(false)
   const [isTTSEnabled, setIsTTSEnabled] = useState(false)
   const [isMenuOpen, setIsMenuOpen] = useState(false)
+  const [copiedId, setCopiedId] = useState<string | null>(null)
   const socketRef = useRef<WebSocket | null>(null)
+
+  const handleCopy = (text: string, id: string) => {
+    navigator.clipboard.writeText(text)
+    setCopiedId(id)
+    setTimeout(() => setCopiedId(null), 2000)
+  }
+
+  const handleTTSPlay = (text: string) => {
+    // TODO: 实现针对特定消息的 TTS 播放功能
+    console.log("TTS Play clicked for:", text)
+  }
   
   // 监听 TTS 开关状态，如果关闭则立即停止当前播放
   useEffect(() => {
@@ -722,7 +736,7 @@ export default function Page() {
                       <p className="text-gray-500 font-medium text-sm whitespace-pre-wrap text-left">{msg.content}</p>
                     </div>
                   ) : (
-                    <div className="w-full max-w-[95%] py-2 animate-in fade-in slide-in-from-left-2 duration-300">
+                    <div className="w-full max-w-[95%] my-2 p-4 rounded-2xl border border-pink-100/50 bg-white/40 backdrop-blur-sm shadow-sm animate-in fade-in slide-in-from-left-2 duration-300 group">
                       <div className="text-[15px] text-gray-800 leading-relaxed font-normal">
                         <ReactMarkdown 
                           remarkPlugins={[remarkGfm]}
@@ -730,8 +744,25 @@ export default function Page() {
                             ul: ({ ...props }) => <ul className="list-disc ml-6 space-y-1 my-2" {...props} />,
                             ol: ({ ...props }) => <ol className="list-decimal ml-6 space-y-1 my-2" {...props} />,
                             p: ({ ...props }) => <p className="mb-2 last:mb-0" {...props} />,
-                            code: ({ ...props }) => <code className="bg-gray-200/50 px-1.5 py-0.5 rounded text-pink-600 font-mono text-sm" {...props} />,
-                            pre: ({ ...props }) => <pre className="bg-gray-800 text-gray-100 p-4 rounded-lg my-3 overflow-x-auto" {...props} />,
+                            code: ({ node, className, children, ...props }: any) => {
+                              const match = /language-(\w+)/.exec(className || '')
+                              return match ? (
+                                <SyntaxHighlighter
+                                  {...props}
+                                  style={vscDarkPlus}
+                                  language={match[1]}
+                                  PreTag="div"
+                                  className="rounded-lg my-3 overflow-x-auto"
+                                >
+                                  {String(children).replace(/\n$/, '')}
+                                </SyntaxHighlighter>
+                              ) : (
+                                <code className="bg-gray-200/50 px-1.5 py-0.5 rounded text-pink-600 font-mono text-sm" {...props}>
+                                  {children}
+                                </code>
+                              )
+                            },
+                            pre: ({ children }) => <>{children}</>,
                             h1: ({ ...props }) => <h1 className="text-xl font-bold mb-3 mt-4" {...props} />,
                             h2: ({ ...props }) => <h2 className="text-lg font-bold mb-2 mt-3" {...props} />,
                             h3: ({ ...props }) => <h3 className="text-base font-bold mb-2 mt-2" {...props} />,
@@ -741,13 +772,37 @@ export default function Page() {
                           {msg.content}
                         </ReactMarkdown>
                       </div>
+
+                      {/* Action Bar - Expanded on Hover */}
+                      <div className="grid grid-rows-[0fr] group-hover:grid-rows-[1fr] transition-[grid-template-rows] duration-300 ease-in-out">
+                        <div className="overflow-hidden">
+                          <div className="flex items-center gap-2 mt-3 pt-2 border-t border-pink-100/30 opacity-0 group-hover:opacity-100 transition-opacity duration-300">
+                            <Button
+                              size="icon"
+                              variant="ghost"
+                              className="h-8 w-8 rounded-lg hover:bg-pink-100/50 text-gray-400 hover:text-pink-500 transition-colors"
+                              onClick={() => handleCopy(msg.content, msg.id)}
+                            >
+                              {copiedId === msg.id ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+                            </Button>
+                            <Button
+                              size="icon"
+                              variant="ghost"
+                              className="h-8 w-8 rounded-lg hover:bg-pink-100/50 text-gray-400 hover:text-pink-500 transition-colors"
+                              onClick={() => handleTTSPlay(msg.content)}
+                            >
+                              <Play className="size-3.5" />
+                            </Button>
+                          </div>
+                        </div>
+                      </div>
                     </div>
                   )}
                 </div>
               ))}
               {isThinking && (
                 <div className="flex flex-col items-start">
-                  <div className="w-full max-w-[95%] py-2 animate-in fade-in slide-in-from-left-2 duration-300">
+                  <div className="w-full max-w-[95%] my-2 p-4 rounded-2xl border border-pink-100/50 bg-white/40 backdrop-blur-sm shadow-sm animate-in fade-in slide-in-from-left-2 duration-300">
                     <div className="text-[15px] text-gray-500 leading-relaxed whitespace-pre-wrap font-normal flex items-center gap-2">
                       <div className="h-2 w-2 rounded-full bg-gray-400 animate-bounce" />
                       思考中...
