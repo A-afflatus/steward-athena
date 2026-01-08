@@ -49,6 +49,7 @@ export default function Page() {
   const mediaStreamRef = useRef<MediaStream | null>(null)
   const currentMessageIdRef = useRef<string | null>(null)
   const latestTextRef = useRef<string>("")
+  const latestEmotionRef = useRef<string | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
   const handleIncomingEventRef = useRef<any>(null)
@@ -85,6 +86,7 @@ export default function Page() {
       const messageId = Date.now().toString()
       currentMessageIdRef.current = messageId
       latestTextRef.current = ""
+      latestEmotionRef.current = null
       
       asrSocket.onopen = () => {
         console.log("[ASR WS] Connected")
@@ -95,6 +97,11 @@ export default function Page() {
         try {
           const response = JSON.parse(event.data)
           const text = response.transcript || (response.data && response.data.transcript) || ""
+          const emotion = response.data?.emotion || null
+          
+          if (emotion) {
+            latestEmotionRef.current = emotion
+          }
           
           if (text) {
             latestTextRef.current = text
@@ -129,7 +136,11 @@ export default function Page() {
           if (socketRef.current) {
             setIsAIGenerating(true)
             setIsThinking(true)
-            socketRef.current.send(JSON.stringify({ content: finalContent }))
+            socketRef.current.send(JSON.stringify({ 
+              event: "user_input",
+              text_input: finalContent,
+              emotion: latestEmotionRef.current
+            }))
           }
         } else {
           // 如果识别内容为空，且消息还存在列表里（空内容），则移除它
@@ -186,7 +197,6 @@ export default function Page() {
             }
             const base64Data = btoa(binary)
             
-            console.log("[ASR WS] Sending audio chunk, base64 length:", base64Data.length)
             asrSocket.send(JSON.stringify({
               event: "send_audio",
               data: base64Data
@@ -255,8 +265,7 @@ export default function Page() {
   const stopVoiceInput = async () => {
     if (!isVoiceInputting) return
     
-    // 1. 延迟 0.5 秒停止录音采集，确保最后的语音能够完整录制
-    console.log("[ASR WS] Release detected, buffering final 0.5s of audio...")
+    // 1. 延迟 1 秒停止录音采集，确保最后的语音能够完整录制
     await new Promise(resolve => setTimeout(resolve, 1000))
 
     // 2. 停止录音采集
@@ -290,7 +299,6 @@ export default function Page() {
       }
       const base64Data = btoa(binary)
       
-      console.log("[ASR WS] Sending final audio chunk, base64 length:", base64Data.length)
       asrSocketRef.current.send(JSON.stringify({
         event: "send_audio",
         data: base64Data
@@ -301,7 +309,6 @@ export default function Page() {
 
     // 4. 根据要求，松手后总共等待 3 秒再发送 stop (close 事件)
     // 已经等待了 0.5 秒，所以还需等待 2.5 秒
-    console.log("[ASR WS] Waiting remaining 2.5s before sending stop signal...")
     await new Promise(resolve => setTimeout(resolve, 2500))
 
     // 5. 发送 close 事件并启动 0.5 秒超时保护
@@ -524,6 +531,7 @@ export default function Page() {
     }
 
     return () => {
+      socket.send(JSON.stringify({ event: "close" }))
       socket.close()
       if (ttsSocketRef.current) {
         ttsSocketRef.current.close()
@@ -638,7 +646,10 @@ export default function Page() {
     setMessages(prev => [...prev, userMsg])
     setIsAIGenerating(true)
     setIsThinking(true)
-    socketRef.current.send(JSON.stringify({ content: messageContent }))
+    socketRef.current.send(JSON.stringify({ 
+      event: "user_input",
+      text_input: messageContent
+    }))
     
     setInputValue("")
     setIsInputMode(false)
