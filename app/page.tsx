@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect, useRef } from "react"
-import { Mic, Upload, Video, Type, Menu, Send } from "lucide-react"
+import { Mic, Upload, Video, Type, Menu, Send, Volume2, VolumeX } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
@@ -21,18 +21,48 @@ export default function Page() {
   const [isThinking, setIsThinking] = useState(false)
   const [isVoiceInputting, setIsVoiceInputting] = useState(false)
   const [isButtonPressed, setIsButtonPressed] = useState(false)
+  const [isTTSEnabled, setIsTTSEnabled] = useState(false)
+  const [isMenuOpen, setIsMenuOpen] = useState(false)
   const socketRef = useRef<WebSocket | null>(null)
+  
+  // 监听 TTS 开关状态，如果关闭则立即停止当前播放
+  useEffect(() => {
+    if (!isTTSEnabled) {
+      if (ttsSocketRef.current) {
+        closeTTS()
+      }
+      // 清空音频队列和停止播放
+      audioQueueRef.current = []
+      isPlayingRef.current = false
+      if (ttsAudioContextRef.current) {
+        // 不关闭 context，但可以暂停或以后重新创建
+        // 简单处理：清空队列即可，当前正在播放的音轨会播完，或者可以 stop source
+      }
+    }
+  }, [isTTSEnabled])
+
   const asrSocketRef = useRef<WebSocket | null>(null)
+  const ttsSocketRef = useRef<WebSocket | null>(null)
   const audioContextRef = useRef<AudioContext | null>(null)
+  const ttsAudioContextRef = useRef<AudioContext | null>(null)
   const processorRef = useRef<ScriptProcessorNode | null>(null)
   const mediaStreamRef = useRef<MediaStream | null>(null)
   const currentMessageIdRef = useRef<string | null>(null)
   const latestTextRef = useRef<string>("")
   const scrollRef = useRef<HTMLDivElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
   const handleIncomingEventRef = useRef<any>(null)
   const audioBufferRef = useRef<Int16Array[]>([])
   const voiceInputTimerRef = useRef<NodeJS.Timeout | null>(null)
   const asrCloseTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+
+  // TTS 播放队列相关
+  const audioQueueRef = useRef<Float32Array[]>([])
+  const isPlayingRef = useRef<boolean>(false)
+  const ttsReadyRef = useRef<boolean>(false)
+  const pendingTextQueueRef = useRef<string[]>([])
+  const rootRunIdRef = useRef<string | null>(null)
+  const targetModelRunIdRef = useRef<string | null>(null)
 
   const startVoiceInput = async () => {
     if (isAIGenerating) return
@@ -312,12 +342,148 @@ export default function Page() {
     }
   }
 
+  // --- TTS 功能实现 ---
+  const connectTTS = () => {
+    if (ttsSocketRef.current) return
+
+    // 清理之前的播放状态
+    audioQueueRef.current = []
+    isPlayingRef.current = false
+    ttsReadyRef.current = false
+    pendingTextQueueRef.current = []
+
+    const ttsSocket = new WebSocket("ws://localhost:8080/ws/tts")
+    ttsSocketRef.current = ttsSocket
+
+    ttsSocket.onopen = () => {
+      console.log("[TTS WS] Connected")
+    }
+
+    ttsSocket.onmessage = async (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        if (data.event === "connection_opened") {
+          console.log("[TTS WS] Connection opened, ready to send text")
+          ttsReadyRef.current = true
+          // 发送之前积攒的文本
+          while (pendingTextQueueRef.current.length > 0) {
+            const text = pendingTextQueueRef.current.shift()
+            if (text) sendTextToTTS(text)
+          }
+        } else if (data.event === "audio_delta" && data.data) {
+          // 处理音频数据
+          const pcmData = base64ToFloat32Array(data.data)
+          audioQueueRef.current.push(pcmData)
+          if (!isPlayingRef.current) {
+            playNextInQueue()
+          }
+        }
+      } catch (e) {
+        console.error("[TTS WS] Failed to parse message:", e)
+      }
+    }
+
+    ttsSocket.onclose = () => {
+      console.log("[TTS WS] Disconnected")
+      ttsSocketRef.current = null
+      ttsReadyRef.current = false
+    }
+
+    ttsSocket.onerror = (error) => {
+      console.error("[TTS WS] Error:", error)
+    }
+  }
+
+  const sendTextToTTS = (text: string) => {
+    if (ttsSocketRef.current?.readyState === WebSocket.OPEN && ttsReadyRef.current) {
+      console.log("[TTS WS] Sending text:", text)
+      ttsSocketRef.current.send(JSON.stringify({
+        event: "send_text",
+        data: text
+      }))
+    } else {
+      console.log("[TTS WS] Not ready, queuing text:", text)
+      pendingTextQueueRef.current.push(text)
+    }
+  }
+
+  const closeTTS = () => {
+    if (ttsSocketRef.current?.readyState === WebSocket.OPEN) {
+      console.log("[TTS WS] Sending close event")
+      ttsSocketRef.current.send(JSON.stringify({ event: "close" }))
+    }
+  }
+
+  const base64ToFloat32Array = (base64: string) => {
+    const binaryString = atob(base64)
+    const len = binaryString.length
+    const bytes = new Uint8Array(len)
+    for (let i = 0; i < len; i++) {
+      bytes[i] = binaryString.charCodeAt(i)
+    }
+    // 确保字节长度是 2 的倍数（PCM 16位）
+    const numSamples = Math.floor(len / 2)
+    const int16Array = new Int16Array(bytes.buffer, 0, numSamples)
+    const float32Array = new Float32Array(numSamples)
+    for (let i = 0; i < numSamples; i++) {
+      float32Array[i] = int16Array[i] / 32768.0
+    }
+    return float32Array
+  }
+
+  const playNextInQueue = async () => {
+    if (audioQueueRef.current.length === 0) {
+      isPlayingRef.current = false
+      return
+    }
+
+    isPlayingRef.current = true
+    const pcmData = audioQueueRef.current.shift()!
+
+    if (!ttsAudioContextRef.current) {
+      ttsAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 })
+    }
+
+    const audioContext = ttsAudioContextRef.current
+    if (audioContext.state === 'suspended') {
+      await audioContext.resume()
+    }
+
+    const audioBuffer = audioContext.createBuffer(1, pcmData.length, 24000)
+    audioBuffer.getChannelData(0).set(pcmData)
+
+    const source = audioContext.createBufferSource()
+    source.buffer = audioBuffer
+    source.connect(audioContext.destination)
+    source.onended = () => {
+      playNextInQueue()
+    }
+    source.start()
+  }
+
   // 自动滚动到底部
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight
     }
   }, [messages])
+
+  // 处理点击外部收起菜单
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
+        setIsMenuOpen(false)
+      }
+    }
+
+    if (isMenuOpen) {
+      document.addEventListener("mousedown", handleClickOutside)
+    }
+
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside)
+    }
+  }, [isMenuOpen])
 
   useEffect(() => {
     handleIncomingEventRef.current = handleIncomingEvent
@@ -359,6 +525,12 @@ export default function Page() {
 
     return () => {
       socket.close()
+      if (ttsSocketRef.current) {
+        ttsSocketRef.current.close()
+      }
+      if (ttsAudioContextRef.current) {
+        ttsAudioContextRef.current.close()
+      }
     }
   }, [])
 
@@ -368,7 +540,35 @@ export default function Page() {
       setIsThinking(false)
     }
 
+    if (event.event === 'on_chain_start') {
+      // 尝试捕捉 rootRunId (第一个 on_chain_start 或没有 parent_ids 的 run)
+      if (!event.parent_ids || event.parent_ids.length === 0) {
+        rootRunIdRef.current = event.run_id
+        targetModelRunIdRef.current = null
+      } else if (!rootRunIdRef.current) {
+        rootRunIdRef.current = event.run_id
+      }
+
+      // 捕捉 targetModelRunId
+      if (
+        event.name === 'model' &&
+        event.parent_ids?.length === 1 &&
+        rootRunIdRef.current &&
+        event.parent_ids[0] === rootRunIdRef.current
+      ) {
+        targetModelRunIdRef.current = event.run_id
+      }
+    }
+
     if (event.event === 'on_dialogue_start') {
+      rootRunIdRef.current = null
+      targetModelRunIdRef.current = null
+
+      // 开启 TTS 连接
+      if (isTTSEnabled) {
+        connectTTS()
+      }
+      
       setMessages(prev => {
         // 避免重复创建 AI 消息对象
         const lastMsg = prev[prev.length - 1]
@@ -379,7 +579,7 @@ export default function Page() {
           ...prev,
           {
             id: Date.now().toString(),
-            role: 'ai',
+            role: 'ai' as const,
             content: ''
           }
         ]
@@ -390,10 +590,23 @@ export default function Page() {
     if (event.event === 'on_dialogue_end') {
       setIsAIGenerating(false)
       setIsThinking(false)
+      // 关闭 TTS
+      closeTTS()
       return
     }
 
     if (event.event === 'on_chat_model_stream' && event.data?.content) {
+      // 只处理 parent_ids 中包含目标 model run_id 的事件
+      const shouldProcess = targetModelRunIdRef.current && event.parent_ids?.includes(targetModelRunIdRef.current)
+      if (!shouldProcess) {
+        return
+      }
+
+      // 发送文本到 TTS
+      if (isTTSEnabled) {
+        sendTextToTTS(event.data.content)
+      }
+
       setMessages(prev => {
         const lastMsg = prev[prev.length - 1]
         if (lastMsg && lastMsg.role === 'ai') {
@@ -401,14 +614,12 @@ export default function Page() {
           return [...prev.slice(0, -1), updatedMsg]
         } else {
           // 如果没有预先创建 AI 消息，则创建一个新的
-          return [
-            ...prev,
-            {
-              id: Date.now().toString(),
-              role: 'ai',
-              content: event.data.content
-            }
-          ]
+          const newMsg: Message = {
+            id: Date.now().toString(),
+            role: 'ai',
+            content: event.data.content
+          }
+          return [...prev, newMsg]
         }
       })
     }
@@ -441,14 +652,37 @@ export default function Page() {
           <h1 className="text-lg font-semibold bg-linear-to-r from-pink-600 via-purple-600 to-cyan-600 bg-clip-text text-transparent">Athena</h1>
           <div className={`size-2 rounded-full ${isConnected ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`} title={isConnected ? '已连接' : '未连接'} />
         </div>
-        <Button 
-          size="icon" 
-          variant="ghost" 
-          className="h-9 w-9 rounded-full hover:bg-white/50 text-gray-600"
-        >
-          <Menu className="size-5" />
-          <span className="sr-only">菜单</span>
-        </Button>
+        <div className="relative" ref={menuRef}>
+          <Button 
+            size="icon" 
+            variant="ghost" 
+            className="h-9 w-9 rounded-full hover:bg-white/50 text-gray-600"
+            onClick={() => setIsMenuOpen(!isMenuOpen)}
+          >
+            <Menu className="size-5" />
+            <span className="sr-only">菜单</span>
+          </Button>
+
+          {isMenuOpen && (
+            <div className="absolute right-0 mt-2 w-48 rounded-xl border border-pink-200/50 bg-white/90 backdrop-blur-md shadow-lg py-2 z-50 animate-in fade-in zoom-in-95 duration-200">
+              <div 
+                className="flex items-center justify-between px-4 py-2 hover:bg-pink-50/50 cursor-pointer transition-colors"
+                onClick={() => {
+                  setIsTTSEnabled(!isTTSEnabled)
+                  // 不自动关闭菜单，方便用户看到状态变化
+                }}
+              >
+                <div className="flex items-center gap-2 text-gray-700">
+                  {isTTSEnabled ? <Volume2 className="size-4 text-pink-500" /> : <VolumeX className="size-4 text-gray-400" />}
+                  <span className="text-sm font-medium">语音播报</span>
+                </div>
+                <div className={`w-8 h-4 rounded-full transition-colors relative ${isTTSEnabled ? 'bg-pink-500' : 'bg-gray-300'}`}>
+                  <div className={`absolute top-0.5 left-0.5 w-3 h-3 rounded-full bg-white transition-transform ${isTTSEnabled ? 'translate-x-4' : 'translate-x-0'}`} />
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
       </header>
 
       {/* Main Content Area and Footer */}
@@ -474,7 +708,7 @@ export default function Page() {
                 >
                   {msg.role === 'user' ? (
                     <div className="max-w-[80%] px-4 py-2">
-                      <p className="text-gray-500 font-medium text-sm whitespace-pre-wrap text-right">{msg.content}</p>
+                      <p className="text-gray-500 font-medium text-sm whitespace-pre-wrap text-left">{msg.content}</p>
                     </div>
                   ) : (
                     <div className="w-full max-w-[95%] py-2 animate-in fade-in slide-in-from-left-2 duration-300">
